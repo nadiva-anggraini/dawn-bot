@@ -266,7 +266,7 @@ class Bot(DawnExtensionAPI):
             if blocked
             else timedelta(seconds=config.keepalive_interval)
         )
-        return datetime.now() + duration
+        return datetime.now(pytz.UTC) + duration
 
     async def process_farming(self) -> None:
         try:
@@ -475,7 +475,7 @@ class Bot(DawnExtensionAPI):
         await Accounts.set_session_blocked_until(email=self.account_data.email, session_blocked_until=sleep_until, app_id=self.account_data.appid)
 
     async def handle_sleep(self, sleep_until):
-        current_time = datetime.now()
+        current_time = datetime.now(pytz.UTC)
         sleep_until = sleep_until.replace(tzinfo=pytz.UTC)
 
         if sleep_until > current_time:
