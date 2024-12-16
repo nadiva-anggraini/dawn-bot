@@ -1,9 +1,13 @@
 import asyncio
 import json
+import random
+
 import names
+
 from datetime import datetime, timezone
 from typing import Literal, Tuple, Any
 from curl_cffi.requests import AsyncSession
+
 from models import Account
 from .exceptions.base import APIError, SessionRateLimited, ServerError
 from loader import captcha_solver, config
@@ -27,12 +31,19 @@ class DawnExtensionAPI:
             "priority": "u=1, i",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         }
-        # Hapus bagian yang terkait dengan proxy
+
+        if self.account_data.proxy:
+            session.proxies = {
+                "http": self.account_data.proxy.as_url,
+                "https": self.account_data.proxy.as_url,
+            }
+
         return session
 
     async def clear_request(self, url: str):
         session = AsyncSession(impersonate="chrome124", verify=False, timeout=30)
-        # Hapus penggunaan proxy di sini
+        session.proxies = self.session.proxies
+
         response = await session.get(url)
         return response
 
@@ -108,6 +119,7 @@ class DawnExtensionAPI:
                         )
 
                 if verify:
+
                     if response.status_code == 403:
                         raise SessionRateLimited("Session is rate limited")
 
@@ -125,6 +137,7 @@ class DawnExtensionAPI:
                 if attempt == max_retries - 1:
                     raise error
                 await asyncio.sleep(retry_delay)
+
 
             except APIError:
                 raise
@@ -158,7 +171,7 @@ class DawnExtensionAPI:
             self.session.cookies.clear()
 
         params = {
-            'appid': 'undefined',
+            'appid': self.account_data.appid,
         }
 
         response = await self.send_request(
@@ -172,12 +185,16 @@ class DawnExtensionAPI:
         response = await self.send_request(
             method="/v1/puzzle/get-puzzle-image",
             request_type="GET",
-            params={"puzzle_id": puzzle_id, "appid": "undefined"},
+            params={"puzzle_id": puzzle_id, "appid": self.account_data.appid},
         )
 
         return response.get("imgBase64")
 
     async def register(self, puzzle_id: str, answer: str) -> dict:
+        params = {
+            'appid': self.account_data.appid,
+        }
+
         json_data = {
             "firstname": names.get_first_name(),
             "lastname": names.get_last_name(),
@@ -185,20 +202,23 @@ class DawnExtensionAPI:
             "mobile": "",
             "password": self.account_data.password,
             "country": "+91",
-            "referralCode": config.referral_code,
+            "referralCode": random.choice(config.referral_codes) if config.referral_codes else "",
             "puzzle_id": puzzle_id,
             "ans": answer,
+            'ismarketing': True,
+            'browserName': 'Chrome',
         }
 
         return await self.send_request(
             method="/v1/puzzle/validate-register",
             json_data=json_data,
+            params=params,
         )
 
     async def keepalive(self) -> dict | str:
         headers = {
             "accept": "*/*",
-            "accept-language": "en-US,en;q=0.9",
+            "accept-language": "en-US,en;q=0.9,ru;q=0.8",
             "authorization": f'Berear {self.session.headers["Berear"]}',
             "content-type": "application/json",
             "origin": "chrome-extension://fpdkjdnhkakefebpekbdhillbhonfjjp",
@@ -209,11 +229,11 @@ class DawnExtensionAPI:
             "username": self.account_data.email,
             "extensionid": "fpdkjdnhkakefebpekbdhillbhonfjjp",
             "numberoftabs": 0,
-            "_v": "1.0.9",
+            "_v": "1.1.1",
         }
 
         params = {
-            'appid': 'undefined',
+            'appid': self.account_data.appid,
         }
 
         return await self.send_request(
@@ -231,7 +251,7 @@ class DawnExtensionAPI:
         del headers["Berear"]
 
         params = {
-            'appid': 'undefined',
+            'appid': self.account_data.appid,
         }
 
         response = await self.send_request(
@@ -243,6 +263,24 @@ class DawnExtensionAPI:
 
         return response["data"]
 
+
+    async def resend_verify_link(self, puzzle_id: str, answer: str) -> dict:
+        params = {
+            'appid': self.account_data.appid,
+        }
+
+        json_data = {
+            'username': self.account_data.email,
+            'puzzle_id': puzzle_id,
+            'ans': answer,
+        }
+
+        return await self.send_request(
+            method="/v1/user/resendverifylink/v2",
+            json_data=json_data,
+            params=params,
+        )
+
     async def complete_tasks(self, tasks: list[str] = None, delay: int = 1) -> None:
         if not tasks:
             tasks = ["telegramid", "discordid", "twitter_x_id"]
@@ -251,6 +289,10 @@ class DawnExtensionAPI:
         headers["authorization"] = f'Brearer {self.session.headers["Berear"]}'
         headers["content-type"] = "application/json"
         del headers["Berear"]
+
+        params = {
+            'appid': self.account_data.appid,
+        }
 
         for task in tasks:
             json_data = {
@@ -261,6 +303,7 @@ class DawnExtensionAPI:
                 method="/v1/profile/update",
                 json_data=json_data,
                 headers=headers,
+                params=params,
             )
 
             await asyncio.sleep(delay)
@@ -283,15 +326,17 @@ class DawnExtensionAPI:
         )
 
         params = {
-            'appid': 'undefined',
+            'appid': self.account_data.appid,
         }
 
         json_data = {
             "username": self.account_data.email,
             "password": self.account_data.password,
             "logindata": {
-                "_v": "1.0.9",
-                "datetime": formatted_datetime_str,
+                '_v': {
+                    'version': '1.1.1',
+                },
+                'datetime': formatted_datetime_str,
             },
             "puzzle_id": puzzle_id,
             "ans": answer,

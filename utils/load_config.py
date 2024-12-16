@@ -1,21 +1,26 @@
 import os
 import yaml
+from itertools import cycle
 from loguru import logger
 from models import Config, Account
+from better_proxy import Proxy
 from typing import List, Dict, Generator
 
 CONFIG_PATH = os.path.join(os.getcwd(), "config")
 CONFIG_DATA_PATH = os.path.join(CONFIG_PATH, "data")
 CONFIG_PARAMS = os.path.join(CONFIG_PATH, "settings.yaml")
 
-REQUIRED_DATA_FILES = ("accounts.txt", "proxies.txt")  # Anda bisa menghapus proxies.txt jika tidak digunakan
+REQUIRED_DATA_FILES = ("accounts.txt", "proxies.txt")
 REQUIRED_PARAMS_FIELDS = (
     "threads",
     "keepalive_interval",
     "imap_settings",
     "captcha_module",
     "delay_before_start",
-    "referral_code",
+    "referral_codes",
+    "redirect_settings",
+    "two_captcha_api_key",
+    "anti_captcha_api_key",
 )
 
 
@@ -44,19 +49,59 @@ def get_params() -> Dict:
     return data
 
 
-def get_accounts(file_name: str) -> Generator[Account, None, None]:
-    accounts = read_file(os.path.join(CONFIG_DATA_PATH, file_name), check_empty=False)
+def get_proxies() -> List[Proxy]:
+    try:
+        proxies = read_file(
+            os.path.join(CONFIG_DATA_PATH, "proxies.txt"), check_empty=False
+        )
+        return [Proxy.from_str(line) for line in proxies] if proxies else []
+    except Exception as exc:
+        raise ValueError(f"Failed to parse proxy: {exc}")
 
-    for account in accounts:
-        try:
-            email, password = account.split(":")
-            yield Account(
-                email=email,
-                password=password,
-                # Hapus penggunaan proxy
-            )
-        except ValueError:
-            logger.error(f"Failed to parse account: {account}")
+
+def get_accounts(file_name: str, redirect_mode: bool = False) -> Generator[Account, None, None]:
+    try:
+        proxies = get_proxies()
+        proxy_cycle = cycle(proxies) if proxies else None
+        accounts = read_file(os.path.join(CONFIG_DATA_PATH, file_name), check_empty=False)
+
+        for account in accounts:
+            try:
+                if not account.strip():
+                    continue
+
+                if redirect_mode:
+                    splits = account.split(":", 1)
+                    if len(splits) == 2:
+                        email, password = splits
+                        yield Account(
+                            email=email.strip(),
+                            password=password.strip(),
+                            proxy=next(proxy_cycle) if proxy_cycle else None
+                        )
+                    else:
+                        yield Account(
+                            email=account.strip(),
+                            proxy=next(proxy_cycle) if proxy_cycle else None
+                        )
+                else:
+                    splits = account.split(":", 1)
+                    if len(splits) != 2:
+                        raise ValueError(f"Invalid account format: {account}")
+
+                    email, password = splits
+                    yield Account(
+                        email=email.strip(),
+                        password=password.strip(),
+                        proxy=next(proxy_cycle) if proxy_cycle else None
+                    )
+
+            except Exception as e:
+                if not redirect_mode:
+                    raise ValueError(f"Failed to parse account: {account}. Error: {str(e)}")
+
+    except Exception as e:
+        raise ValueError(f"Failed to process accounts file: {str(e)}")
 
 
 def validate_domains(accounts: List[Account], domains: Dict[str, str]) -> List[Account]:
@@ -72,20 +117,30 @@ def validate_domains(accounts: List[Account], domains: Dict[str, str]) -> List[A
 
 def load_config() -> Config:
     try:
-        reg_accounts = list(get_accounts("register.txt"))
-        farm_accounts = list(get_accounts("farm.txt"))
+        params = get_params()
 
-        if not reg_accounts and not farm_accounts:
+        reg_accounts = list(get_accounts("register.txt", redirect_mode=params["redirect_settings"]["enabled"]))
+        farm_accounts = list(get_accounts("farm.txt"))
+        reverify_accounts = list(get_accounts("reverify.txt"))
+
+        if not reg_accounts and not farm_accounts and not reverify_accounts:
             raise ValueError("No accounts found in data files")
 
-        params = get_params()
         config = Config(
-            **params, accounts_to_farm=farm_accounts, accounts_to_register=reg_accounts
+            **params, accounts_to_farm=farm_accounts, accounts_to_register=reg_accounts, accounts_to_reverify=reverify_accounts
         )
+
+        if config.redirect_settings.enabled and not config.redirect_settings.email and not config.redirect_settings.password and not config.redirect_settings.imap_server:
+            raise ValueError("Redirect email or password or imap server is missing")
 
         if reg_accounts:
             config.accounts_to_register = validate_domains(
                 reg_accounts, config.imap_settings
+            )
+
+        if reverify_accounts:
+            config.accounts_to_reverify = validate_domains(
+                reverify_accounts, config.imap_settings
             )
 
         if config.captcha_module == "2captcha" and not config.two_captcha_api_key:
